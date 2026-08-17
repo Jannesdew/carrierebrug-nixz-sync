@@ -1,0 +1,19 @@
+{
+  "platforms": [
+    "CIRCLE_8",
+    "FLEXTENDER",
+    "FLEXWERKPORTAAL",
+    "FLINTER",
+    "HAERT",
+    "HARVEY_NASH",
+    "MAGNIT",
+    "MERCELL",
+    "POOLZ_ID",
+    "SALESFORCE",
+    "SELECT",
+    "TENDERNED",
+    "TENPU",
+    "THE_SOLUTIONS_FACTORY",
+    "YACHT"
+  ]
+}

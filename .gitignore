@@ -1,0 +1,7 @@
+nixz_config.json
+airtable_config.json
+webflow_config.json
+nixz_sync_state.json
+nixz_pending_upload.json
+*.pyc
+__pycache__/
