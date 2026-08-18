@@ -342,19 +342,41 @@ def main():
         print("Niets te doen, klaar.")
         return
 
-    created = []  # (airtable_record_id, webflow_item_id)
+    # Belangrijk voor duplicaat-preventie: de "Webflow Item ID" wordt direct
+    # na aanmaken (in kleine batches) teruggeschreven naar Airtable, niet
+    # pas aan het eind van de hele run. Zo blijft een gecreeerd item nooit
+    # lang "onzichtbaar" voor Airtable's unsynced-filter - als het script
+    # halverwege crasht (timeout, rate limit, runner killed), is het risico
+    # beperkt tot maximaal 1 batch (10 items) i.p.v. de hele run. Dit is
+    # precies het scenario dat eerder tot 87 dubbele concept-items leidde.
+    created = []  # (airtable_record_id, webflow_item_id) - voor publiceren
+    pending_writeback = []
     failed = 0
+
+    def flush_writeback():
+        if pending_writeback:
+            airtable_update_records(
+                airtable_base_url_root, airtable_headers, config["airtable_table_name"], list(pending_writeback)
+            )
+            pending_writeback.clear()
+
     for i, record in enumerate(records, 1):
         field_data = build_field_data(record["fields"])
         verbose = limit is not None  # volledige respons tonen tijdens gericht testen
         item_id = webflow_create_item(config["webflow_collection_id"], webflow_headers, field_data, verbose=verbose)
         if item_id:
             created.append((record["id"], item_id))
+            pending_writeback.append({"id": record["id"], "fields": {"Webflow Item ID": item_id, "Sync status": "Nieuw"}})
             print(f"  [{i}/{len(records)}] aangemaakt: {field_data.get('name')} -> {item_id}", flush=True)
         else:
             failed += 1
             print(f"  [{i}/{len(records)}] MISLUKT: {field_data.get('name')}", flush=True)
+
+        if len(pending_writeback) >= AIRTABLE_WRITE_BATCH:
+            flush_writeback()
         time.sleep(WEBFLOW_PAUSE_SECONDS)
+
+    flush_writeback()  # eventuele restjes (< 10) alsnog wegschrijven
 
     if failed:
         print(f"Let op: {failed} item(s) niet aangemaakt (zie foutmeldingen hierboven).", flush=True)
@@ -366,16 +388,15 @@ def main():
     if config["auto_publish"]:
         print(f"Publiceren van {len(created)} item(s)...", flush=True)
         webflow_publish_items(config["webflow_collection_id"], webflow_headers, [wid for _, wid in created])
+        status_updates = [
+            {"id": rec_id, "fields": {"Sync status": "Gepubliceerd"}}
+            for rec_id, _ in created
+        ]
+        airtable_update_records(airtable_base_url_root, airtable_headers, config["airtable_table_name"], status_updates)
         sync_status = "Gepubliceerd"
     else:
         print("Publiceren overgeslagen (--no-publish of AUTO_PUBLISH=false) — items staan als concept in Webflow.", flush=True)
         sync_status = "Nieuw"
-
-    updates = [
-        {"id": rec_id, "fields": {"Webflow Item ID": wid, "Sync status": sync_status}}
-        for rec_id, wid in created
-    ]
-    airtable_update_records(airtable_base_url_root, airtable_headers, config["airtable_table_name"], updates)
 
     print(f"Klaar. {len(created)} opdrachten naar Webflow gesynchroniseerd "
           f"({sync_status}).")
