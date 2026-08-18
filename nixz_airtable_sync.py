@@ -236,13 +236,17 @@ def to_airtable_fields(job, scrub_patterns, check_patterns):
         "Sluitingsdatum": date_only(job.get("closingDate")),
         "Duur": job.get("duration"),
         "Uren minimum": job.get("hoursMinimum"),
-        "Uren maximum": job.get("hoursMaxmimum"),
+        "Uren maximum": job.get("hoursMaximum"),
         "Salaris minimum": job.get("salaryMinimum"),
         "Salaris maximum": job.get("salaryMaximum"),
         "Salarisschaal": job.get("salaryScale"),
         "Freelancer toegestaan": job.get("freelancerAllowed"),
         "URL (intern)": job.get("url"),
         "NIXZ createdDate": job.get("createdDate"),
+        "Opleiding": (job.get("educations") or [{}])[0].get("level"),
+        "Aantal professionals": job.get("maximumCandidates"),
+        "Verlengingsoptie": job.get("extensionOption"),
+        "Startdatum tekst": job.get("startDateText"),
     }
     # Drop nulls -- Airtable is happier not receiving explicit nulls for
     # fields like singleSelect/date, and it keeps payloads smaller.
