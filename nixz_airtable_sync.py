@@ -27,6 +27,15 @@ Known platform/leverancier values are accumulated in known_platforms.json
 NIXZ adds a platform that isn't in their own API documentation (this
 happened during testing: FLINTER, CIRCLE_8 and HAERT appear in live data
 but are missing from the NIXZ swagger).
+
+Client-logo enrichment (known_client_logos.json, ook in de repo) werkt
+op dezelfde manier: opdrachtgever-naam -> logo-URL, case-insensitief
+gematcht, best-effort (niet elke opdrachtgever hoeft een match te hebben).
+Vul known_client_logos.json gewoon aan zodra er nieuwe logo's beschikbaar
+komen -- elke volgende sync-run (elke 15 min) pakt de aanvulling automatisch
+mee voor nieuwe opdrachten. Bestaande Airtable-records worden er niet
+retroactief door bijgewerkt (create-only cursor-sync); dat was een losse
+eenmalige backfill.
 """
 import json
 import os
@@ -39,6 +48,7 @@ from datetime import datetime, timezone
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 KNOWN_PLATFORMS_PATH = os.path.join(SCRIPT_DIR, "known_platforms.json")
+KNOWN_LOGOS_PATH = os.path.join(SCRIPT_DIR, "known_client_logos.json")
 
 NIXZ_PAGE_SIZE = 100
 NIXZ_MAX_PAGES = 1000  # safety cap: 100k records, way above realistic volume
@@ -203,17 +213,30 @@ def save_known_platforms(platforms):
         json.dump({"platforms": sorted(platforms)}, f, indent=2)
 
 
+def load_known_logos():
+    """Opdrachtgever-naam -> logo-URL, case-insensitief op naam (getrimd).
+    known_client_logos.json wordt in de repo bijgehouden (net als
+    known_platforms.json) en kan gewoon aangevuld worden zodra er nieuwe
+    logo's beschikbaar komen -- niet elke opdrachtgever hoeft een match te
+    hebben, dit is best-effort verrijking, geen vereiste."""
+    data = _load_json_if_exists(KNOWN_LOGOS_PATH)
+    return {name.strip().lower(): url for name, url in data.items()}
+
+
 # --------------------------------------------------------------------------
 # Record shaping
 # --------------------------------------------------------------------------
 
-def to_airtable_fields(job, scrub_patterns, check_patterns):
+def to_airtable_fields(job, scrub_patterns, check_patterns, known_logos):
     description_clean, review_1 = scrub_text(job.get("description"), scrub_patterns, check_patterns)
     candidate_clean, review_2 = scrub_text(job.get("candidateDescription"), scrub_patterns, check_patterns)
     needs_review = review_1 or review_2
 
     def date_only(value):
         return value[:10] if value else None
+
+    employer = job.get("employer")
+    logo_url = known_logos.get((employer or "").strip().lower())
 
     fields = {
         "Titel": job.get("title"),
@@ -247,6 +270,7 @@ def to_airtable_fields(job, scrub_patterns, check_patterns):
         "Aantal professionals": job.get("maximumCandidates"),
         "Verlengingsoptie": job.get("extensionOption"),
         "Startdatum tekst": job.get("startDateText"),
+        "Logo URL": logo_url,
     }
     # Drop nulls -- Airtable is happier not receiving explicit nulls for
     # fields like singleSelect/date, and it keeps payloads smaller.
@@ -370,7 +394,10 @@ def main():
     scrub_patterns, check_patterns = build_patterns(terms)
     print(f"Scrub-lijst ({len(terms)} termen): {terms}", flush=True)
 
-    records = [{"fields": to_airtable_fields(job, scrub_patterns, check_patterns)} for job in jobs]
+    known_logos = load_known_logos()
+    print(f"Logo-lookup geladen: {len(known_logos)} bekende opdrachtgevers.", flush=True)
+
+    records = [{"fields": to_airtable_fields(job, scrub_patterns, check_patterns, known_logos)} for job in jobs]
     flagged = sum(1 for r in records if r["fields"].get("Nog te controleren"))
     if flagged:
         print(f"Let op: {flagged} record(en) gemarkeerd als 'Nog te controleren'.", flush=True)
