@@ -81,8 +81,8 @@ DEFAULT_AIRTABLE_BASE_ID = "appgoJ97eVpLTyQq6"
 DEFAULT_AIRTABLE_TABLE_NAME = "Opdrachten"
 SYNC_TARGETS_PATH = os.path.join(SCRIPT_DIR, "sync_targets.json")
  
-IS_NIEUW_REVISIT_WINDOW_DAYS = 9
-IS_NIEUW_DAYS = 7  # voorstel, nog te bevestigen met Jannes
+IS_NIEUW_REVISIT_WINDOW_DAYS = int(os.environ.get("IS_NIEUW_REVISIT_WINDOW_DAYS", "4"))
+IS_NIEUW_DAYS = 2  # een opdracht is 'nieuw' tot 2 dagen na NIXZ createdDate
  
 EXPIRED_GRACE_DAYS = 5  # dagen na Sluitingsdatum voordat item uit Webflow verwijderd wordt
 AIRTABLE_PURGE_MONTHS = 6  # maanden na Sluitingsdatum voordat record uit Airtable verwijderd wordt (alleen via --purge-airtable)
@@ -313,12 +313,13 @@ def airtable_fetch_unsynced(base_url_root, headers, table_name, item_id_field):
     return records
  
  
-def airtable_fetch_recent_synced(base_url_root, headers, table_name, item_id_field, days):
+def airtable_fetch_recent_synced(base_url_root, headers, table_name, item_id_field, sync_status_field, days):
     import urllib.parse
     from datetime import datetime, timezone, timedelta
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     formula = (
         f"AND(NOT({{{item_id_field}}} = ''), "
+        f"NOT({{{sync_status_field}}} = 'Verwijderd (verlopen)'), "
         f"IS_AFTER({{NIXZ createdDate}}, '{cutoff}'))"
     )
     records = []
@@ -521,6 +522,19 @@ def build_field_data_v1(fields):
 # Mapper v2 -- fase2/nieuwe site
 # --------------------------------------------------------------------------
  
+def compute_is_nieuw(created_raw):
+    from datetime import datetime, timezone, timedelta
+    if not created_raw:
+        return True
+    try:
+        dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt) < timedelta(days=IS_NIEUW_DAYS)
+ 
+ 
 def build_field_data_v2(fields, unmapped_tracker=None):
     nixz_id = fields.get("NIXZ ID")
     titel = fields.get("Titel") or "Opdracht"
@@ -551,7 +565,7 @@ def build_field_data_v2(fields, unmapped_tracker=None):
         "kandidaatomschrijving-html": fix_lists_for_webflow(fields.get("Kandidaatomschrijving (Webflow)")),
         "external-id": str(nixz_id) if nixz_id is not None else None,
         "opleiding": fields.get("Opleiding"),
-        "is-nieuw": True,
+        "is-nieuw": compute_is_nieuw(fields.get("NIXZ createdDate")),
     }
  
     logo_url = fields.get("Logo URL")
@@ -667,7 +681,8 @@ def sync_is_nieuw_switch(airtable_base_url_root, airtable_headers, table_name, t
  
     print(f"  [{target['name']}] Recente opdrachten checken voor '{switch_field}'-status...", flush=True)
     records = airtable_fetch_recent_synced(
-        airtable_base_url_root, airtable_headers, table_name, item_id_field, IS_NIEUW_REVISIT_WINDOW_DAYS
+        airtable_base_url_root, airtable_headers, table_name, item_id_field,
+        target["sync_status_field"], IS_NIEUW_REVISIT_WINDOW_DAYS
     )
     if not records:
         print(f"    Geen recente gesynchroniseerde opdrachten gevonden.", flush=True)
