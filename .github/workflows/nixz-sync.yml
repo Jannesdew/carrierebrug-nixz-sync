@@ -1,5 +1,5 @@
 name: NIXZ naar Airtable naar Webflow sync
-
+ 
 on:
   schedule:
     # Elke 15 minuten - kan omdat de repo publiek is (onbeperkte gratis
@@ -13,26 +13,33 @@ on:
         default: "true"
         type: choice
         options: ["true", "false"]
-
+ 
+# Nooit twee runs tegelijk (de eerste grote import duurt langer dan 15 min).
+# Een nieuwe run wacht tot de lopende klaar is.
+concurrency:
+  group: nixz-sync
+  cancel-in-progress: false
+ 
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 180
     permissions:
       contents: write  # nodig om known_platforms.json terug te committen
     steps:
       - uses: actions/checkout@v4
-
+ 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
+ 
       - name: NIXZ naar Airtable
         env:
           NIXZ_USERNAME: ${{ secrets.NIXZ_USERNAME }}
           NIXZ_PASSWORD: ${{ secrets.NIXZ_PASSWORD }}
           AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
         run: python3 nixz_airtable_sync.py
-
+ 
       - name: known_platforms.json terug committen (indien gewijzigd)
         run: |
           if ! git diff --quiet -- known_platforms.json; then
@@ -44,10 +51,11 @@ jobs:
           else
             echo "Geen wijzigingen in known_platforms.json"
           fi
-
-      - name: Airtable naar Webflow
+ 
+      - name: Airtable naar Webflow (alle targets uit sync_targets.json)
         env:
           AIRTABLE_TOKEN: ${{ secrets.AIRTABLE_TOKEN }}
           WEBFLOW_API_TOKEN: ${{ secrets.WEBFLOW_API_TOKEN }}
+          WEBFLOW_API_TOKEN_V2: ${{ secrets.WEBFLOW_API_TOKEN_V2 }}
           AUTO_PUBLISH: ${{ github.event.inputs.publish || 'true' }}
         run: python3 airtable_webflow_sync.py
