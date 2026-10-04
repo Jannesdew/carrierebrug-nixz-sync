@@ -81,8 +81,8 @@ DEFAULT_AIRTABLE_BASE_ID = "appgoJ97eVpLTyQq6"
 DEFAULT_AIRTABLE_TABLE_NAME = "Opdrachten"
 SYNC_TARGETS_PATH = os.path.join(SCRIPT_DIR, "sync_targets.json")
  
-IS_NIEUW_REVISIT_WINDOW_DAYS = int(os.environ.get("IS_NIEUW_REVISIT_WINDOW_DAYS", "4"))
-IS_NIEUW_DAYS = 2  # een opdracht is 'nieuw' tot 2 dagen na NIXZ createdDate
+IS_NIEUW_REVISIT_WINDOW_DAYS = int(os.environ.get("IS_NIEUW_REVISIT_WINDOW_DAYS", "5"))
+IS_NIEUW_DAYS = 3  # een opdracht is 'nieuw' tot 3 dagen na NIXZ createdDate
  
 EXPIRED_GRACE_DAYS = 5  # dagen na Sluitingsdatum voordat item uit Webflow verwijderd wordt
 AIRTABLE_PURGE_MONTHS = 6  # maanden na Sluitingsdatum voordat record uit Airtable verwijderd wordt (alleen via --purge-airtable)

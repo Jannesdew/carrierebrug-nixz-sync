@@ -1,14 +1,5 @@
 [
   {
-    "name": "oude-site",
-    "mapper": "v1",
-    "collection_id": "689bb58f2ecf8b74698435b6",
-    "item_id_field": "Webflow Item ID",
-    "sync_status_field": "Sync status",
-    "token_env": "WEBFLOW_API_TOKEN",
-    "token_key": "token"
-  },
-  {
     "name": "fase2-staging",
     "mapper": "v2",
     "collection_id": "6a8f5d61df541d4edc682872",
