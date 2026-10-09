@@ -81,7 +81,7 @@ DEFAULT_AIRTABLE_BASE_ID = "appgoJ97eVpLTyQq6"
 DEFAULT_AIRTABLE_TABLE_NAME = "Opdrachten"
 SYNC_TARGETS_PATH = os.path.join(SCRIPT_DIR, "sync_targets.json")
  
-IS_NIEUW_REVISIT_WINDOW_DAYS = int(os.environ.get("IS_NIEUW_REVISIT_WINDOW_DAYS", "5"))
+IS_NIEUW_REVISIT_WINDOW_DAYS = int(os.environ.get("IS_NIEUW_REVISIT_WINDOW_DAYS", "4"))
 IS_NIEUW_DAYS = 3  # een opdracht is 'nieuw' tot 3 dagen na NIXZ createdDate
  
 EXPIRED_GRACE_DAYS = 5  # dagen na Sluitingsdatum voordat item uit Webflow verwijderd wordt
@@ -889,7 +889,9 @@ def sync_is_nieuw_switch(airtable_base_url_root, airtable_headers, table_name, t
         except ValueError:
             continue
         is_nieuw = (now - created_dt) < timedelta(days=IS_NIEUW_DAYS)
-        items.append({"id": item_id, "fieldData": {"is-nieuw": is_nieuw}})
+        if is_nieuw:
+            continue  # staat al op true (gezet bij aanmaken); alleen de omslag naar false patchen
+        items.append({"id": item_id, "fieldData": {"is-nieuw": False}})
  
     updated_ids = webflow_update_items(target["collection_id"], webflow_headers, items)
     missing_here = [it["id"] for it in items if it["id"] in MISSING_ITEM_IDS]
