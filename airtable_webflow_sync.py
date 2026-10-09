@@ -995,8 +995,24 @@ def run_target(target, airtable_base_url_root, airtable_headers, table_name, aut
                 pending_writeback.append({"id": record["id"], "fields": wb_fields})
                 print(f"  [{name}] [{i}/{len(records)}] aangemaakt: {field_data.get('name')} -> {item_id}", flush=True)
             else:
-                failed += 1
-                print(f"  [{name}] [{i}/{len(records)}] MISLUKT: {field_data.get('name')}", flush=True)
+                alt_id = None
+                for suffix in ("-2", "-3"):
+                    alt = dict(field_data)
+                    alt["slug"] = f"{field_data.get('slug')}{suffix}"
+                    alt_id = webflow_create_item(target["collection_id"], webflow_headers, alt, verbose=verbose)
+                    if alt_id:
+                        break
+                if alt_id:
+                    created.append((record["id"], alt_id))
+                    wb_alt = {item_id_field: alt_id, sync_status_field: "Nieuw"}
+                    if target.get("content_version_field"):
+                        wb_alt[target["content_version_field"]] = CONTENT_VERSION
+                    pending_writeback.append({"id": record["id"], "fields": wb_alt})
+                    print(f"  [{name}] [{i}/{len(records)}] aangemaakt met alternatieve slug: "
+                          f"{field_data.get('name')} -> {alt_id}", flush=True)
+                else:
+                    failed += 1
+                    print(f"  [{name}] [{i}/{len(records)}] MISLUKT: {field_data.get('name')}", flush=True)
  
             if len(pending_writeback) >= AIRTABLE_WRITE_BATCH:
                 flush_writeback()
