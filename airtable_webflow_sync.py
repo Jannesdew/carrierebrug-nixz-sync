@@ -593,7 +593,117 @@ def build_field_data_v2(fields, unmapped_tracker=None):
         else:
             track("categorie", categorie)
  
+    field_data["eisen"] = lines_to_html(fields.get("Eisen"))
+    field_data["wensen"] = lines_to_html(fields.get("Wensen"))
+    field_data["competenties"] = lines_to_html(fields.get("Competenties"))
+    field_data["latitude"] = fields.get("Latitude")
+    field_data["longitude"] = fields.get("Longitude")
+    field_data["taal"] = _pretty_enum(fields.get("Taal"), LANGUAGE_LABELS)
+    field_data["senioriteit"] = _pretty_enum(fields.get("Senioriteit"), SENIORITY_LABELS)
+    field_data["dienstverband"] = _pretty_enum(fields.get("Employment type"), EMPLOYMENT_LABELS)
+ 
     return {k: v for k, v in field_data.items() if v is not None}
+ 
+ 
+LANGUAGE_LABELS = {"DUTCH": "Nederlands", "ENGLISH": "Engels", "GERMAN": "Duits", "FRENCH": "Frans"}
+SENIORITY_LABELS = {"JUNIOR": "Junior", "MID_LEVEL": "Medior", "SENIOR": "Senior",
+                    "EXECUTIVE": "Executive", "ENTRY_LEVEL": "Starter"}
+EMPLOYMENT_LABELS = {"INTERIM": "Interim", "PERMANENT": "Vast", "FREELANCE": "Freelance"}
+CONTENT_SYNC_MAX_PER_RUN = 300
+CONTENT_VERSION = "2"
+ 
+ 
+def _pretty_enum(value, labels):
+    if not value:
+        return None
+    return labels.get(value) or value.replace("_", " ").capitalize()
+ 
+ 
+def lines_to_html(text):
+    """Eisen/wensen/competenties: elke regel een bullet-alinea (zelfde
+    aanpak als fix_lists_for_webflow, want <li> rendert niet goed via de API)."""
+    import html as _html
+    lines = [l.strip() for l in (text or "").split("\n") if l.strip()]
+    if not lines:
+        return None
+    return "".join(f"<p>\u2022 {_html.escape(l)}</p>" for l in lines)
+ 
+ 
+def webflow_get_field_slugs(collection_id, headers):
+    result = http_json(f"https://api.webflow.com/v2/collections/{collection_id}", headers=headers)
+    if not result:
+        return None
+    return {f.get("slug") for f in result.get("fields", [])}
+ 
+ 
+def filter_to_schema(field_data, slugs, missing):
+    if slugs is None:
+        return field_data
+    out = {}
+    for k, v in field_data.items():
+        if k in slugs:
+            out[k] = v
+        else:
+            missing.add(k)
+    return out
+ 
+ 
+def airtable_fetch_content_stale(base_url_root, headers, table_name, item_id_field,
+                                 sync_status_field, version_field, limit):
+    import urllib.parse
+    formula = (
+        f"AND(NOT({{{item_id_field}}} = ''), "
+        f"NOT({{{sync_status_field}}} = 'Verwijderd (verlopen)'), "
+        f"{{Sluitingsdatum}} != '', NOT(IS_BEFORE({{Sluitingsdatum}}, TODAY())), "
+        f"{{Taal}} != '', NOT({{{version_field}}} = '{CONTENT_VERSION}'))"
+    )
+    records = []
+    offset = None
+    while len(records) < limit:
+        params = {"filterByFormula": formula, "pageSize": 100}
+        if offset:
+            params["offset"] = offset
+        url = f"{base_url_root}/{urllib.parse.quote(table_name)}?{urllib.parse.urlencode(params)}"
+        result = http_json(url, headers=headers)
+        if not result:
+            break
+        records.extend(result.get("records", []))
+        offset = result.get("offset")
+        if not offset:
+            break
+    return records[:limit]
+ 
+ 
+def sync_content_updates(target, airtable_base_url_root, airtable_headers, table_name,
+                         webflow_headers, auto_publish, schema_slugs, mapper):
+    name = target["name"]
+    item_id_field = target["item_id_field"]
+    version_field = target["content_version_field"]
+    records = airtable_fetch_content_stale(
+        airtable_base_url_root, airtable_headers, table_name, item_id_field,
+        target["sync_status_field"], version_field, CONTENT_SYNC_MAX_PER_RUN)
+    if not records:
+        print(f"  [{name}] Geen bestaande items met nieuwe/gewijzigde inhoud.", flush=True)
+        return
+    print(f"  [{name}] {len(records)} bestaand(e) item(s) bijwerken met nieuwe inhoud...", flush=True)
+    missing = set()
+    items, rec_by_item = [], {}
+    for r in records:
+        fd = mapper(r["fields"])
+        fd.pop("slug", None)
+        fd = filter_to_schema(fd, schema_slugs, missing)
+        item_id = r["fields"].get(item_id_field)
+        items.append({"id": item_id, "fieldData": fd})
+        rec_by_item[item_id] = r["id"]
+    if missing:
+        print(f"  [{name}] Let op: velden bestaan nog niet in Webflow en zijn overgeslagen: {sorted(missing)}", flush=True)
+    updated_ids = webflow_update_items(target["collection_id"], webflow_headers, items)
+    print(f"  [{name}] {len(updated_ids)}/{len(items)} item(s) bijgewerkt.", flush=True)
+    if auto_publish and updated_ids:
+        webflow_publish_items(target["collection_id"], webflow_headers, updated_ids)
+        airtable_update_records(airtable_base_url_root, airtable_headers, table_name,
+                                [{"id": rec_by_item[i], "fields": {version_field: CONTENT_VERSION}} for i in updated_ids])
+        print(f"  [{name}] {len(updated_ids)} item(s) gepubliceerd.", flush=True)
  
  
 MAPPERS = {
@@ -757,6 +867,8 @@ def run_target(target, airtable_base_url_root, airtable_headers, table_name, aut
               f"'{target.get('token_key')}').", flush=True)
         return
     webflow_headers = {"Authorization": f"Bearer {webflow_token}", "Content-Type": "application/json"}
+    schema_slugs = webflow_get_field_slugs(target["collection_id"], webflow_headers)
+    missing_slugs = set()
  
     print(f"[{name}] Airtable-records zonder '{item_id_field}' ophalen (met sluitingsdatum)...", flush=True)
     records = airtable_fetch_unsynced(airtable_base_url_root, airtable_headers, table_name, item_id_field)
@@ -782,10 +894,14 @@ def run_target(target, airtable_base_url_root, airtable_headers, table_name, aut
                 field_data = mapper(record["fields"], unmapped_tracker=unmapped)
             else:
                 field_data = mapper(record["fields"])
+            field_data = filter_to_schema(field_data, schema_slugs, missing_slugs)
             item_id = webflow_create_item(target["collection_id"], webflow_headers, field_data, verbose=verbose)
             if item_id:
                 created.append((record["id"], item_id))
-                pending_writeback.append({"id": record["id"], "fields": {item_id_field: item_id, sync_status_field: "Nieuw"}})
+                wb_fields = {item_id_field: item_id, sync_status_field: "Nieuw"}
+                if target.get("content_version_field"):
+                    wb_fields[target["content_version_field"]] = CONTENT_VERSION
+                pending_writeback.append({"id": record["id"], "fields": wb_fields})
                 print(f"  [{name}] [{i}/{len(records)}] aangemaakt: {field_data.get('name')} -> {item_id}", flush=True)
             else:
                 failed += 1
@@ -825,6 +941,13 @@ def run_target(target, airtable_base_url_root, airtable_headers, table_name, aut
             airtable_update_records(airtable_base_url_root, airtable_headers, table_name,
                                     [{"id": r["id"], "fields": {sync_status_field: "Gepubliceerd"}} for r in pending])
             print(f"[{name}] {len(pending_ids)} item(s) gepubliceerd.", flush=True)
+ 
+    if missing_slugs:
+        print(f"[{name}] Let op: velden bestaan nog niet in Webflow en zijn overgeslagen: {sorted(missing_slugs)}", flush=True)
+ 
+    if target.get("content_version_field"):
+        sync_content_updates(target, airtable_base_url_root, airtable_headers, table_name,
+                             webflow_headers, auto_publish, schema_slugs, mapper)
  
     if target.get("revisit_switch_field"):
         sync_is_nieuw_switch(airtable_base_url_root, airtable_headers, table_name, target, webflow_headers, auto_publish)

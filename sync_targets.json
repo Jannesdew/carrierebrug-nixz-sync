@@ -7,6 +7,7 @@
     "sync_status_field": "Sync status (v2)",
     "token_env": "WEBFLOW_API_TOKEN_V2",
     "token_key": "token_v2",
-    "revisit_switch_field": "is-nieuw"
+    "revisit_switch_field": "is-nieuw",
+    "content_version_field": "Webflow content versie (v2)"
   }
 ]

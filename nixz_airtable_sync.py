@@ -133,7 +133,7 @@ def nixz_authenticate(base_url, username, password):
     return token
 
 
-def nixz_fetch_jobs(base_url, token, min_created_date):
+def nixz_fetch_jobs(base_url, token, min_updated_date=None, closing_after=None):
     """Fetch jobs created after min_created_date (proven to work; unlike
     id.greaterThan, which real testing showed the API appears to ignore —
     it returned 33,000+ historical records instead of only newer ones)."""
@@ -142,9 +142,13 @@ def nixz_fetch_jobs(base_url, token, min_created_date):
     page = 0
     previous_first_id = None
     while True:
-        params = f"sort=createdDate,asc&size={NIXZ_PAGE_SIZE}&page={page}"
-        if min_created_date is not None:
-            params += f"&createdDate.greaterThan={min_created_date}"
+        if closing_after is not None:
+            params = (f"sort=closingDate,asc&size={NIXZ_PAGE_SIZE}&page={page}"
+                      f"&closingDate.greaterThan={closing_after}")
+        else:
+            params = f"sort=updatedDate,asc&size={NIXZ_PAGE_SIZE}&page={page}"
+            if min_updated_date is not None:
+                params += f"&updatedDate.greaterThan={min_updated_date}"
         url = f"{base_url}/feed/jobs?{params}"
 
         t0 = time.time()
@@ -178,6 +182,83 @@ def nixz_fetch_jobs(base_url, token, min_created_date):
 # Scrub
 # --------------------------------------------------------------------------
 
+def nixz_fetch_criteria(base_url, token, job_id):
+    """Criteria van een opdracht; None bij een fout (niet fataal)."""
+    req = urllib.request.Request(f"{base_url}/feed/job/{job_id}/job-criteria")
+    req.add_header("Accept", "application/json")
+    req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            raw = resp.read()
+            return json.loads(raw) if raw else []
+    except Exception as e:
+        print(f"  Waarschuwing: criteria ophalen mislukt voor {job_id}: {e}", flush=True)
+        return None
+ 
+ 
+_HEADING_EXACT = {"eisen", "wensen", "harde eisen", "harde eisen (must haves)", "wensen (nice to haves)",
+                  "must haves", "nice to haves", "competenties", "knock-out criteria", "knock-outcriteria"}
+ 
+ 
+def _is_heading(text):
+    low = text.lower().strip(" :-")
+    return low in _HEADING_EXACT or low.startswith("harde eisen") or (low.startswith("wensen") and len(low) < 30)
+ 
+ 
+def build_criteria_fields(criteria, scrub_patterns, check_patterns):
+    """Alleen kandidaat-criteria. Eisen zonder procedurele regels (die staan al
+    in de gestructureerde velden: start, uren, duur, locatie)."""
+    buckets = {"REQUIREMENT": [], "WISH": [], "COMPETENCE": []}
+    needs_review = False
+    seen = set()
+    for c in criteria or []:
+        if c.get("audience") != "CANDIDATE":
+            continue
+        ctype = c.get("type")
+        if ctype not in buckets:
+            continue
+        if ctype == "REQUIREMENT" and c.get("domain") == "PROCEDURAL":
+            continue
+        text = re.sub(r"\s+", " ", (c.get("text") or "")).strip()
+        if not text or _is_heading(text):
+            continue
+        text, review = scrub_text(text, scrub_patterns, check_patterns)
+        needs_review = needs_review or review
+        key = (ctype, text.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        buckets[ctype].append(text)
+    return {
+        "Eisen": "\n".join(buckets["REQUIREMENT"]),
+        "Wensen": "\n".join(buckets["WISH"]),
+        "Competenties": "\n".join(buckets["COMPETENCE"]),
+    }, needs_review
+ 
+ 
+def _airtable_get_max_field(base_url_root, headers, table_name, field_name):
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "maxRecords": 1,
+        "sort[0][field]": field_name,
+        "sort[0][direction]": "desc",
+    })
+    url = f"{base_url_root}/{urllib.parse.quote(table_name)}?{params}"
+    result = http_json(url, headers=headers)
+    records = (result or {}).get("records", [])
+    if not records:
+        return None
+    return records[0]["fields"].get(field_name)
+ 
+ 
+def airtable_get_sync_cursor(base_url_root, headers, table_name):
+    updated = _airtable_get_max_field(base_url_root, headers, table_name, "NIXZ updatedDate")
+    if updated is not None:
+        return updated, "NIXZ updatedDate"
+    created = _airtable_get_max_field(base_url_root, headers, table_name, "NIXZ createdDate")
+    return created, "NIXZ createdDate (fallback, nog geen NIXZ updatedDate bekend)"
+ 
+ 
 def derive_term(raw_value):
     if not raw_value or raw_value == "NONE":
         return None
@@ -227,16 +308,22 @@ def load_known_logos():
 # Record shaping
 # --------------------------------------------------------------------------
 
-def to_airtable_fields(job, scrub_patterns, check_patterns, known_logos):
+def to_airtable_fields(job, scrub_patterns, check_patterns, known_logos, criteria=None):
     description_clean, review_1 = scrub_text(job.get("description"), scrub_patterns, check_patterns)
     candidate_clean, review_2 = scrub_text(job.get("candidateDescription"), scrub_patterns, check_patterns)
     needs_review = review_1 or review_2
+    criteria_fields = {}
+    if criteria is not None:
+        criteria_fields, review_3 = build_criteria_fields(criteria, scrub_patterns, check_patterns)
+        needs_review = needs_review or review_3
 
     def date_only(value):
         return value[:10] if value else None
 
     employer = job.get("employer")
     logo_url = known_logos.get((employer or "").strip().lower())
+    if not logo_url:
+        logo_url = (job.get("company") or {}).get("logoUrl") or None
 
     fields = {
         "Titel": job.get("title"),
@@ -271,6 +358,15 @@ def to_airtable_fields(job, scrub_patterns, check_patterns, known_logos):
         "Verlengingsoptie": job.get("extensionOption"),
         "Startdatum tekst": job.get("startDateText"),
         "Logo URL": logo_url,
+        "Employment type": job.get("employmentType"),
+        "Senioriteit": job.get("seniorityLevel"),
+        "NIXZ updatedDate": job.get("updatedDate"),
+        "Taal": job.get("language"),
+        "Latitude": job.get("latitude"),
+        "Longitude": job.get("longitude"),
+        # Reset: forceert dat de Webflow-sync dit item opnieuw bijwerkt
+        "Webflow content versie (v2)": "",
+        **criteria_fields,
     }
     # Drop nulls -- Airtable is happier not receiving explicit nulls for
     # fields like singleSelect/date, and it keeps payloads smaller.
@@ -356,8 +452,9 @@ def main():
         print(f"Testmodus: alleen opdrachten aangemaakt na {max_created_date} "
               f"(negeert de Airtable-cursor).", flush=True)
     else:
-        print("Hoogste bekende NIXZ createdDate in Airtable opvragen...", flush=True)
-        max_created_date = airtable_get_max_created_date(airtable_base_url_root, airtable_headers, config["airtable_table_name"])
+        print("Hoogste bekende NIXZ updatedDate in Airtable opvragen...", flush=True)
+        max_created_date, cursor_field = airtable_get_sync_cursor(airtable_base_url_root, airtable_headers, config["airtable_table_name"])
+        print(f"Cursor-veld: {cursor_field}", flush=True)
         if max_created_date is None:
             print("Geen bestaande records gevonden — dit haalt ALLES op vanaf het begin. "
                   "Overweeg eerst te testen met --since-days 1 als je niet zeker weet "
@@ -369,7 +466,12 @@ def main():
     token = nixz_authenticate(config["nixz_base_url"], config["nixz_username"], config["nixz_password"])
     print("Authenticatie gelukt. Opdrachten ophalen...", flush=True)
 
-    jobs = nixz_fetch_jobs(config["nixz_base_url"], token, max_created_date)
+    if "--backfill-active" in sys.argv:
+        closing_after = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        print("Backfill-modus: alle nog niet gesloten opdrachten ophalen.", flush=True)
+        jobs = nixz_fetch_jobs(config["nixz_base_url"], token, closing_after=closing_after)
+    else:
+        jobs = nixz_fetch_jobs(config["nixz_base_url"], token, max_created_date)
     print(f"Opgehaald: {len(jobs)} nieuwe/gewijzigde opdrachten van NIXZ.", flush=True)
 
     before_filter = len(jobs)
@@ -397,7 +499,18 @@ def main():
     known_logos = load_known_logos()
     print(f"Logo-lookup geladen: {len(known_logos)} bekende opdrachtgevers.", flush=True)
 
-    records = [{"fields": to_airtable_fields(job, scrub_patterns, check_patterns, known_logos)} for job in jobs]
+    records = []
+    criteria_failed = 0
+    for n, job in enumerate(jobs, 1):
+        criteria = nixz_fetch_criteria(config["nixz_base_url"], token, job.get("id"))
+        if criteria is None:
+            criteria_failed += 1
+        records.append({"fields": to_airtable_fields(job, scrub_patterns, check_patterns, known_logos, criteria)})
+        if n % 100 == 0:
+            print(f"  Criteria opgehaald: {n}/{len(jobs)}", flush=True)
+        time.sleep(0.1)
+    if criteria_failed:
+        print(f"Let op: criteria ontbreken voor {criteria_failed} opdracht(en) (bestaande waarden blijven staan).", flush=True)
     flagged = sum(1 for r in records if r["fields"].get("Nog te controleren"))
     if flagged:
         print(f"Let op: {flagged} record(en) gemarkeerd als 'Nog te controleren'.", flush=True)
