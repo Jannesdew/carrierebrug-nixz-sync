@@ -535,6 +535,26 @@ def compute_is_nieuw(created_raw):
     return (datetime.now(timezone.utc) - dt) < timedelta(days=IS_NIEUW_DAYS)
  
  
+TARIEF_MIN = 25    # uurtarief in euro's; alles daarbuiten is geen geloofwaardig uurtarief
+TARIEF_MAX = 250
+ 
+ 
+def clean_tarief(mn, mx):
+    """Alleen geloofwaardige uurtarieven. Bij een bereik moeten beide waarden
+    geldig zijn en min <= max, anders vervallen allebei."""
+    def ok(v):
+        return isinstance(v, (int, float)) and TARIEF_MIN <= v <= TARIEF_MAX
+    if mn is not None and mx is not None:
+        if ok(mn) and ok(mx) and mn <= mx:
+            return mn, mx
+        return None, None
+    if mn is not None:
+        return (mn if ok(mn) else None), None
+    if mx is not None:
+        return None, (mx if ok(mx) else None)
+    return None, None
+ 
+ 
 def build_field_data_v2(fields, unmapped_tracker=None):
     nixz_id = fields.get("NIXZ ID")
     titel = fields.get("Titel") or "Opdracht"
@@ -544,6 +564,7 @@ def build_field_data_v2(fields, unmapped_tracker=None):
             unmapped_tracker.setdefault(key, set()).add(value)
  
     aantal_professionals = fields.get("Aantal professionals")
+    tarief_min, tarief_max = clean_tarief(fields.get("Salaris minimum"), fields.get("Salaris maximum"))
  
     field_data = {
         "name": titel,
@@ -556,8 +577,8 @@ def build_field_data_v2(fields, unmapped_tracker=None):
         "einddatum": fields.get("Einddatum"),
         "uren-minimum": fields.get("Uren minimum"),
         "uren-maximum": fields.get("Uren maximum"),
-        "salaris-minimum": fields.get("Salaris minimum"),
-        "salaris-maximum": fields.get("Salaris maximum"),
+        "salaris-minimum": tarief_min,
+        "salaris-maximum": tarief_max,
         "aanvang": format_aanvang(fields.get("Startdatum"), fields.get("Startdatum tekst")),
         "aantal-professionals": str(aantal_professionals) if aantal_professionals is not None else None,
         "verlengingsoptie": fields.get("Verlengingsoptie"),
@@ -602,7 +623,9 @@ def build_field_data_v2(fields, unmapped_tracker=None):
     field_data["senioriteit"] = _pretty_enum(fields.get("Senioriteit"), SENIORITY_LABELS)
     field_data["dienstverband"] = _pretty_enum(fields.get("Employment type"), EMPLOYMENT_LABELS)
  
-    return {k: v for k, v in field_data.items() if v is not None}
+    # tarief expliciet als null meesturen, zodat foute waarden ook bij bestaande items verdwijnen
+    keep_null = {"salaris-minimum", "salaris-maximum"}
+    return {k: v for k, v in field_data.items() if v is not None or k in keep_null}
  
  
 LANGUAGE_LABELS = {"DUTCH": "Nederlands", "ENGLISH": "Engels", "GERMAN": "Duits", "FRENCH": "Frans"}
@@ -610,7 +633,7 @@ SENIORITY_LABELS = {"JUNIOR": "Junior", "MID_LEVEL": "Medior", "SENIOR": "Senior
                     "EXECUTIVE": "Executive", "ENTRY_LEVEL": "Starter"}
 EMPLOYMENT_LABELS = {"INTERIM": "Interim", "PERMANENT": "Vast", "FREELANCE": "Freelance"}
 CONTENT_SYNC_MAX_PER_RUN = 300
-CONTENT_VERSION = "2"
+CONTENT_VERSION = "3"
  
  
 def _pretty_enum(value, labels):
