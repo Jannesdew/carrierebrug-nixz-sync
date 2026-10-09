@@ -807,6 +807,9 @@ def webflow_publish_items(collection_id, headers, item_ids):
         time.sleep(WEBFLOW_PAUSE_SECONDS)
  
  
+MISSING_ITEM_IDS = set()  # items die in Webflow niet (meer) bestaan, gevuld door webflow_update_items
+
+
 def webflow_update_items(collection_id, headers, items):
     url = f"https://api.webflow.com/v2/collections/{collection_id}/items"
     updated_ids = []
@@ -815,6 +818,15 @@ def webflow_update_items(collection_id, headers, items):
         result = http_json(url, method="PATCH", headers=headers, body={"items": batch})
         if result:
             updated_ids.extend(item["id"] for item in batch)
+        else:
+            # Eén ontbrekend item laat de hele batch falen: item voor item opnieuw.
+            for it in batch:
+                res = webflow_patch_item(collection_id, headers, it["id"], it["fieldData"])
+                if res == "ok":
+                    updated_ids.append(it["id"])
+                elif res == "missing":
+                    MISSING_ITEM_IDS.add(it["id"])
+                time.sleep(WEBFLOW_PAUSE_SECONDS)
         time.sleep(WEBFLOW_PAUSE_SECONDS)
     return updated_ids
  
@@ -880,6 +892,16 @@ def sync_is_nieuw_switch(airtable_base_url_root, airtable_headers, table_name, t
         items.append({"id": item_id, "fieldData": {"is-nieuw": is_nieuw}})
  
     updated_ids = webflow_update_items(target["collection_id"], webflow_headers, items)
+    missing_here = [it["id"] for it in items if it["id"] in MISSING_ITEM_IDS]
+    if missing_here:
+        rec_by = {r["fields"].get(item_id_field): r["id"] for r in records}
+        wipe = {item_id_field: "", target["sync_status_field"]: "Ontbrak in Webflow"}
+        if target.get("content_version_field"):
+            wipe[target["content_version_field"]] = ""
+        airtable_update_records(airtable_base_url_root, airtable_headers, table_name,
+                                [{"id": rec_by[i], "fields": dict(wipe)} for i in missing_here if i in rec_by])
+        print(f"    {len(missing_here)} item(s) bestaan niet meer in Webflow -- ID gewist, "
+              f"worden opnieuw aangemaakt.", flush=True)
     print(f"    {len(updated_ids)}/{len(items)} item(s) bijgewerkt.", flush=True)
     if auto_publish and updated_ids:
         webflow_publish_items(target["collection_id"], webflow_headers, updated_ids)
