@@ -698,12 +698,79 @@ def sync_content_updates(target, airtable_base_url_root, airtable_headers, table
     if missing:
         print(f"  [{name}] Let op: velden bestaan nog niet in Webflow en zijn overgeslagen: {sorted(missing)}", flush=True)
     updated_ids = webflow_update_items(target["collection_id"], webflow_headers, items)
+    done = set(updated_ids)
+    failed_ids = [i["id"] for i in items if i["id"] not in done]
+    if failed_ids:
+        print(f"  [{name}] {len(failed_ids)} item(s) mislukt in bulk -- afzonderlijk opnieuw proberen...", flush=True)
+        by_id = {i["id"]: i for i in items}
+        missing_ids = []
+        for iid in failed_ids:
+            res = webflow_patch_item(target["collection_id"], webflow_headers, iid, by_id[iid]["fieldData"])
+            if res == "ok":
+                updated_ids.append(iid)
+            elif res == "missing":
+                missing_ids.append(iid)
+            time.sleep(WEBFLOW_PAUSE_SECONDS)
+        if missing_ids:
+            print(f"  [{name}] {len(missing_ids)} item(s) bestaan niet meer in Webflow -- ID wissen, "
+                  f"worden bij de volgende run opnieuw aangemaakt.", flush=True)
+            airtable_update_records(airtable_base_url_root, airtable_headers, table_name,
+                                    [{"id": rec_by_item[i], "fields": {
+                                        item_id_field: "", target["sync_status_field"]: "Ontbrak in Webflow",
+                                        version_field: ""}} for i in missing_ids])
     print(f"  [{name}] {len(updated_ids)}/{len(items)} item(s) bijgewerkt.", flush=True)
     if auto_publish and updated_ids:
         webflow_publish_items(target["collection_id"], webflow_headers, updated_ids)
         airtable_update_records(airtable_base_url_root, airtable_headers, table_name,
                                 [{"id": rec_by_item[i], "fields": {version_field: CONTENT_VERSION}} for i in updated_ids])
         print(f"  [{name}] {len(updated_ids)} item(s) gepubliceerd.", flush=True)
+ 
+ 
+WERKVELDEN_COLLECTION_ID = "6ab2de6d9a48b25c35c221d5"
+EXTRA_CATEGORY_NAMES = {
+    # NIXZ-enum -> naam van het werkveld in de Werkvelden-collectie
+    "PROCUREMENT_AND_CONTRACT_MANAGEMENT": "Inkoop/Aanbesteding",
+}
+ 
+ 
+def resolve_extra_categories(headers):
+    """Zoekt live de item-ID's op van werkvelden die niet hardcoded staan."""
+    result = http_json(f"https://api.webflow.com/v2/collections/{WERKVELDEN_COLLECTION_ID}/items?limit=100",
+                       headers=headers)
+    if not result:
+        return
+    by_name = {}
+    for it in result.get("items", []):
+        nm = (it.get("fieldData") or {}).get("name")
+        if nm:
+            by_name[nm.strip().lower()] = it.get("id")
+    for enum_value, naam in EXTRA_CATEGORY_NAMES.items():
+        item_id = by_name.get(naam.lower())
+        if item_id:
+            CATEGORY_TO_CATEGORIE_ID_V2[enum_value] = item_id
+        else:
+            print(f"  Waarschuwing: werkveld '{naam}' niet gevonden in Werkvelden-collectie.", flush=True)
+ 
+ 
+def webflow_patch_item(collection_id, headers, item_id, field_data):
+    """Eén item bijwerken. Geeft 'ok', 'missing' (404) of 'error' terug."""
+    url = f"https://api.webflow.com/v2/collections/{collection_id}/items/{item_id}"
+    req = urllib.request.Request(url, data=json.dumps({"fieldData": field_data}).encode("utf-8"), method="PATCH")
+    req.add_header("Accept", "application/json")
+    req.add_header("Content-Type", "application/json")
+    for k, v in headers.items():
+        req.add_header(k, v)
+    try:
+        with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT):
+            return "ok"
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return "missing"
+        print(f"    !! HTTP {e.code} bij PATCH item {item_id}: {e.read().decode('utf-8', errors='replace')[:300]}", flush=True)
+        return "error"
+    except urllib.error.URLError as e:
+        print(f"    !! Netwerkfout bij item {item_id}: {e}", flush=True)
+        return "error"
  
  
 MAPPERS = {
@@ -869,6 +936,8 @@ def run_target(target, airtable_base_url_root, airtable_headers, table_name, aut
     webflow_headers = {"Authorization": f"Bearer {webflow_token}", "Content-Type": "application/json"}
     schema_slugs = webflow_get_field_slugs(target["collection_id"], webflow_headers)
     missing_slugs = set()
+    if target["mapper"] == "v2":
+        resolve_extra_categories(webflow_headers)
  
     print(f"[{name}] Airtable-records zonder '{item_id_field}' ophalen (met sluitingsdatum)...", flush=True)
     records = airtable_fetch_unsynced(airtable_base_url_root, airtable_headers, table_name, item_id_field)
