@@ -51,7 +51,7 @@ KNOWN_PLATFORMS_PATH = os.path.join(SCRIPT_DIR, "known_platforms.json")
 KNOWN_LOGOS_PATH = os.path.join(SCRIPT_DIR, "known_client_logos.json")
 
 NIXZ_PAGE_SIZE = 100
-NIXZ_MAX_PAGES = 1000  # safety cap: 100k records, way above realistic volume
+NIXZ_MAX_PAGES = 100  # safety cap per run: 10k records
 REQUEST_TIMEOUT = 30
 AIRTABLE_BATCH_SIZE = 10  # Airtable REST API hard limit per write request
 AIRTABLE_PAUSE_SECONDS = 0.25  # keeps us under the 5 req/sec rate limit
@@ -133,7 +133,19 @@ def nixz_authenticate(base_url, username, password):
     return token
 
 
-def nixz_fetch_jobs(base_url, token, min_updated_date=None, closing_after=None):
+def nixz_updated_filter_works(base_url, token, cursor):
+    """Test met 1 record of de API updatedDate.greaterThan echt respecteert."""
+    if not cursor:
+        return True
+    url = f"{base_url}/feed/jobs?sort=updatedDate,asc&size=1&page=0&updatedDate.greaterThan={cursor}"
+    batch = http_json(url, headers={"Authorization": f"Bearer {token}"})
+    if not batch:
+        return True
+    first = (batch[0].get("updatedDate") or "")[:19]
+    return (not first) or first >= cursor[:19]
+ 
+ 
+def nixz_fetch_jobs(base_url, token, min_updated_date=None, closing_after=None, min_created_date=None):
     """Fetch jobs created after min_created_date (proven to work; unlike
     id.greaterThan, which real testing showed the API appears to ignore —
     it returned 33,000+ historical records instead of only newer ones)."""
@@ -145,6 +157,9 @@ def nixz_fetch_jobs(base_url, token, min_updated_date=None, closing_after=None):
         if closing_after is not None:
             params = (f"sort=closingDate,asc&size={NIXZ_PAGE_SIZE}&page={page}"
                       f"&closingDate.greaterThan={closing_after}")
+        elif min_created_date is not None:
+            params = (f"sort=createdDate,asc&size={NIXZ_PAGE_SIZE}&page={page}"
+                      f"&createdDate.greaterThan={min_created_date}")
         else:
             params = f"sort=updatedDate,asc&size={NIXZ_PAGE_SIZE}&page={page}"
             if min_updated_date is not None:
@@ -471,7 +486,14 @@ def main():
         print("Backfill-modus: alle nog niet gesloten opdrachten ophalen.", flush=True)
         jobs = nixz_fetch_jobs(config["nixz_base_url"], token, closing_after=closing_after)
     else:
-        jobs = nixz_fetch_jobs(config["nixz_base_url"], token, max_created_date)
+        if nixz_updated_filter_works(config["nixz_base_url"], token, max_created_date):
+            jobs = nixz_fetch_jobs(config["nixz_base_url"], token, max_created_date)
+        else:
+            print("Waarschuwing: NIXZ negeert de updatedDate-filter -- terugvallen op createdDate.", flush=True)
+            created_cursor = _airtable_get_max_field(airtable_base_url_root, airtable_headers,
+                                                     config["airtable_table_name"], "NIXZ createdDate")
+            print(f"createdDate-cursor: {created_cursor}", flush=True)
+            jobs = nixz_fetch_jobs(config["nixz_base_url"], token, min_created_date=created_cursor)
     print(f"Opgehaald: {len(jobs)} nieuwe/gewijzigde opdrachten van NIXZ.", flush=True)
 
     before_filter = len(jobs)
